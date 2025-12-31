@@ -1,6 +1,6 @@
 {
     "name": "vega-stremio-addon",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "Stremio addon that provides streams from Vega providers",
     "main": "index.js",
     "scripts": {
