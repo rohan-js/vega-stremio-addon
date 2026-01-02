@@ -1,10 +1,6 @@
 /**
  * Vega Stremio Addon
- * 
- * This addon provides streaming links from Vega providers
- * for movies and series in Stremio.
- * 
- * Supports configuration to enable/disable individual providers.
+ * Main entry point with advanced metadata formatting and cleanup logic.
  */
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
@@ -13,58 +9,20 @@ const { getStreamsFromAllProviders } = require('./lib/providerLoader');
 const { imdbToTmdb, parseStremioId } = require('./lib/imdbToTmdb');
 const { getSubtitles } = require('./lib/subtitleProvider');
 
-// Build configuration options for each provider
-const providerConfigOptions = config.enabledProviders.map(provider => ({
-    key: provider.value,
-    type: 'checkbox',
-    default: 'true',
-    title: provider.displayName,
-    // Group providers by category
-    ...(provider.priority <= 17 ? {} :
-        provider.priority <= 25 ? {} :
-            provider.priority <= 30 ? {} : {})
-}));
-
-// Addon manifest with configuration support
 const manifest = {
     id: 'org.vega.stremio.addon',
-    version: '1.2.0',
+    version: '1.6.0',
     name: 'Vega Providers',
-    description: 'Stream movies and series from 31 Vega providers with built-in subtitles. Configure which providers to use in addon settings.',
-
-    // Supported content types
+    description: 'Advanced streaming with Auto-Size detection, Multi-Language support, and Clean UI.',
     types: ['movie', 'series'],
-
-    // We provide streams AND subtitles
     resources: ['stream', 'subtitles'],
-
-    // We work with IMDB IDs
     idPrefixes: ['tt'],
-
-    // Catalog definitions (empty since we only provide streams)
     catalogs: [],
-
-    // Background and logo for the addon page
     background: 'https://raw.githubusercontent.com/vega-org/vega-app/main/assets/icon.png',
     logo: 'https://raw.githubusercontent.com/vega-org/vega-app/main/assets/icon.png',
-
-    // Contact info
-    contactEmail: '',
-
-    // Behavior hints - THIS ENABLES CONFIGURATION
-    behaviorHints: {
-        configurable: true,
-        configurationRequired: false,
-    },
-
-    // Configuration options for each provider
+    behaviorHints: { configurable: true, configurationRequired: false },
     config: [
-        {
-            key: 'info',
-            type: 'text',
-            title: '--- GLOBAL PROVIDERS ---',
-        },
-        // Global providers
+        { key: 'info', type: 'text', title: '--- GLOBAL PROVIDERS ---' },
         { key: 'autoEmbed', type: 'checkbox', default: 'true', title: 'MultiStream (Best for most movies)' },
         { key: 'vega', type: 'checkbox', default: 'true', title: 'VegaMovies' },
         { key: 'drive', type: 'checkbox', default: 'true', title: 'MoviesDrive' },
@@ -82,13 +40,7 @@ const manifest = {
         { key: 'zeefliz', type: 'checkbox', default: 'true', title: 'Zeefliz' },
         { key: 'ringz', type: 'checkbox', default: 'true', title: 'Ringz' },
         { key: 'hdhub4u', type: 'checkbox', default: 'true', title: 'HdHub4u' },
-
-        {
-            key: 'info2',
-            type: 'text',
-            title: '--- ENGLISH PROVIDERS ---',
-        },
-        // English providers
+        { key: 'info2', type: 'text', title: '--- ENGLISH PROVIDERS ---' },
         { key: 'showbox', type: 'checkbox', default: 'true', title: 'ShowBox' },
         { key: 'ridoMovies', type: 'checkbox', default: 'true', title: 'RidoMovies' },
         { key: 'flixhq', type: 'checkbox', default: 'true', title: 'FlixHQ' },
@@ -97,13 +49,7 @@ const manifest = {
         { key: 'animetsu', type: 'checkbox', default: 'true', title: 'Animetsu (Anime)' },
         { key: 'tokyoInsider', type: 'checkbox', default: 'true', title: 'TokyoInsider (Anime)' },
         { key: 'kissKh', type: 'checkbox', default: 'true', title: 'KissKh (K-Drama)' },
-
-        {
-            key: 'info3',
-            type: 'text',
-            title: '--- INDIA/REGIONAL PROVIDERS ---',
-        },
-        // India/Regional providers
+        { key: 'info3', type: 'text', title: '--- INDIA/REGIONAL PROVIDERS ---' },
         { key: 'ogomovies', type: 'checkbox', default: 'true', title: 'Ogomovies (India)' },
         { key: 'moviezwap', type: 'checkbox', default: 'true', title: 'MoviezWap (India)' },
         { key: 'luxMovies', type: 'checkbox', default: 'true', title: 'RogMovies (India)' },
@@ -113,193 +59,124 @@ const manifest = {
     ],
 };
 
-// Create the addon builder
 const builder = new addonBuilder(manifest);
 
 /**
- * Stream Handler
- * This is called when a user clicks on a movie/series in Stremio
+ * CLEANER UTILITIES
  */
+
+// 1. Sanitize Provider Name
+const cleanProviderName = (name) => {
+    if (!name) return 'Vega';
+    return name
+        .split(/[-!|]/)[0] // Remove everything after separators like - or !
+        .replace(/WebStreamr|Direct|Server|Link|Cloud/gi, '') // Remove generic junk words
+        .trim();
+};
+
+// 2. Advanced Title Formatter
+const formatStreamTitle = (stream, cleanQuality) => {
+    const provider = cleanProviderName(stream.providerName);
+
+    // Metadata parts
+    const size = stream.size ? `💾 ${stream.size}` : '';
+    const audio = stream.language && stream.language !== 'Multi' ? `🗣️ ${stream.language}` : '';
+    const quality = cleanQuality ? `✨ ${cleanQuality}` : '';
+    const subIcon = (stream.subtitles && stream.subtitles.length > 0) ? '🔤' : '';
+
+    // Determine Quality Emoji
+    const qVal = parseInt(cleanQuality);
+    let qEmoji = '⭐';
+    if (qVal >= 2160) qEmoji = '🔥'; // 4K
+    else if (qVal >= 1080) qEmoji = '💎'; // 1080p
+
+    // Construct the metadata bar (e.g. "✨ 1080p | 🗣️ Hindi | 💾 1.2 GB")
+    const metaBar = [quality, audio, size, subIcon]
+        .filter(part => part && part.trim() !== '') // Remove empty parts
+        .join(' | ');
+
+    // Main line: "💎 MultiStream | ✨ 1080p | 💾 1.5 GB"
+    let title = `${qEmoji} ${provider} | ${metaBar}`;
+
+    // Add server info ONLY if it's different/useful
+    if (stream.server) {
+        const cleanServer = stream.server.replace(/Server|Link|cdn/gi, '').trim();
+        // Check similarity to prevent "Provider: Vega, Server: Vega"
+        if (cleanServer.toLowerCase() !== provider.toLowerCase() && cleanServer.length > 2) {
+            title += `\n🖥️ ${cleanServer}`;
+        }
+    }
+
+    return title;
+};
+
 builder.defineStreamHandler(async (args) => {
-    console.log('='.repeat(60));
-    console.log(`Stream request: ${args.type} - ${args.id}`);
-    console.log('='.repeat(60));
-
-    // Get user configuration (which providers are enabled)
+    // Handle configuration
     const userConfig = args.config || {};
-    console.log('User config received:', JSON.stringify(userConfig));
-
-    // Determine which providers are enabled
-    // If no config is provided, use all providers (default behavior)
-    let enabledProvidersList;
-
-    if (Object.keys(userConfig).length === 0) {
-        // No config provided - use all providers
-        console.log('No user config - using all providers');
-        enabledProvidersList = config.enabledProviders;
-    } else {
-        // Filter based on user config
-        // Stremio checkboxes: checked = 'true' or 'on', unchecked = not present or 'false'
+    let enabledProvidersList = config.enabledProviders;
+    if (Object.keys(userConfig).length > 0) {
         enabledProvidersList = config.enabledProviders.filter(p => {
-            const configValue = userConfig[p.value];
-            // Include if: value is 'true', 'on', true, or not explicitly set to 'false'
-            const isEnabled = configValue === 'true' || configValue === 'on' ||
-                configValue === true || configValue === undefined ||
-                (configValue !== 'false' && configValue !== false);
-            return isEnabled;
+            const val = userConfig[p.value];
+            return val === 'true' || val === 'on' || val === true || val === undefined;
         });
     }
 
-    console.log(`Enabled providers (${enabledProvidersList.length}): ${enabledProvidersList.map(p => p.displayName).join(', ')}`);
-
-
     try {
-        // Parse the Stremio ID
         const { imdbId, season, episode } = parseStremioId(args.id);
-        console.log(`Parsed ID: IMDB=${imdbId}, Season=${season}, Episode=${episode}`);
-
-        // Determine content type
         const type = args.type === 'series' ? 'series' : 'movie';
-
-        // Convert IMDB to TMDB ID
-        console.log('Converting IMDB to TMDB...');
         const tmdbId = await imdbToTmdb(imdbId, type);
-        console.log(`TMDB ID: ${tmdbId}`);
 
-        if (!tmdbId && !imdbId) {
-            console.log('No valid ID found');
-            return { streams: [] };
-        }
+        if (!tmdbId && !imdbId) return { streams: [] };
 
-        // Prepare parameters for providers
-        const params = {
-            imdbId: imdbId,
-            tmdbId: tmdbId || '',
-            type: type,
-            season: season || '',
-            episode: episode || '',
-        };
+        const vegaStreams = await getStreamsFromAllProviders(
+            { imdbId, tmdbId: tmdbId || '', type, season: season || '', episode: episode || '' }, 
+            enabledProvidersList
+        );
 
-        console.log('Fetching streams from providers...');
-
-        // Get streams from enabled providers only
-        const vegaStreams = await getStreamsFromAllProviders(params, enabledProvidersList);
-        console.log(`Found ${vegaStreams.length} streams from providers`);
-
-        // Convert Vega streams to Stremio format
         const stremioStreams = vegaStreams.map((stream) => {
-            // Determine stream title
-            let title = stream.providerName || 'Unknown';
-            if (stream.server) {
-                title += ` - ${stream.server}`;
-            }
-            if (stream.quality) {
-                title += ` [${stream.quality}p]`;
-            }
+            // Fix double quality issue (e.g. "2160p[2160p]" -> "2160p")
+            const qMatch = (stream.quality || 'HD').toString().match(/\d{3,4}/);
+            const cleanQ = qMatch ? `${qMatch[0]}p` : 'HD';
 
-            // Add subtitle indicator if available
-            if (stream.subtitles && stream.subtitles.length > 0) {
-                title += ` 🔤`;
-            }
+            const provider = cleanProviderName(stream.providerName);
 
-            // Create Stremio stream object
-            const stremioStream = {
-                name: stream.providerName || 'Vega',
-                title: title,
-            };
-
-            // Add the stream URL
-            if (stream.link) {
-                if (stream.type === 'm3u8' || stream.link.includes('.m3u8')) {
-                    // HLS stream
-                    stremioStream.url = stream.link;
-                } else {
-                    // Direct URL
-                    stremioStream.url = stream.link;
-                }
-            }
-
-            // Add headers if present
-            if (stream.headers) {
-                stremioStream.behaviorHints = {
+            return {
+                name: `${provider}\n${cleanQ}`, // Compact Name for left column
+                title: formatStreamTitle(stream, cleanQ), // Rich Description
+                url: stream.link,
+                behaviorHints: {
                     notWebReady: true,
-                    proxyHeaders: {
-                        request: stream.headers,
-                    },
-                };
-            }
-
-            // Add embedded subtitles from provider if available
-            if (stream.subtitles && Array.isArray(stream.subtitles) && stream.subtitles.length > 0) {
-                stremioStream.subtitles = stream.subtitles.map((sub, index) => ({
+                    proxyHeaders: stream.headers ? { request: stream.headers } : undefined
+                },
+                subtitles: stream.subtitles ? stream.subtitles.map((sub, index) => ({
                     id: `${stream.providerValue || 'vega'}-sub-${index}`,
                     url: sub.uri || sub.url || sub.link,
                     lang: sub.language || sub.lang || 'eng',
-                })).filter(sub => sub.url);
-            }
-
-            return stremioStream;
+                })).filter(sub => sub.url) : []
+            };
         });
 
-        // Filter out streams without URLs
-        const validStreams = stremioStreams.filter(s => s.url);
-        console.log(`Returning ${validStreams.length} valid streams to Stremio`);
+        // Sort: 4K first, then 1080p
+        stremioStreams.sort((a, b) => {
+            const getQ = (s) => parseInt(s.name.match(/\d{3,4}/)?.[0] || '0');
+            return getQ(b) - getQ(a);
+        });
 
-        return { streams: validStreams };
+        return { streams: stremioStreams.filter(s => s.url) };
 
     } catch (error) {
-        console.error('Stream handler error:', error);
+        console.error('Stream Handler Error:', error);
         return { streams: [] };
     }
 });
 
-/**
- * Subtitle Handler
- * This is called when Stremio needs subtitles for a movie/series
- */
 builder.defineSubtitlesHandler(async (args) => {
-    console.log('='.repeat(60));
-    console.log(`Subtitle request: ${args.type} - ${args.id}`);
-    console.log('='.repeat(60));
-
     try {
-        // Parse the Stremio ID
         const { imdbId, season, episode } = parseStremioId(args.id);
-        console.log(`Fetching subtitles for IMDB=${imdbId}, Season=${season}, Episode=${episode}`);
-
-        // Fetch subtitles
         const subtitles = await getSubtitles(imdbId, args.type, season, episode);
-        console.log(`Found ${subtitles.length} subtitles`);
-
-        return { subtitles };
-    } catch (error) {
-        console.error('Subtitle handler error:', error);
-        return { subtitles: [] };
-    }
+        return { subtitles: subtitles || [] };
+    } catch (e) { return { subtitles: [] }; }
 });
 
-// Start the addon server
-const port = config.port;
+const port = config.port || 7000;
 serveHTTP(builder.getInterface(), { port });
-
-console.log('');
-console.log('='.repeat(60));
-console.log('🎬 Vega Stremio Addon Started!');
-console.log('='.repeat(60));
-console.log('');
-console.log(`Addon URL: http://127.0.0.1:${port}/manifest.json`);
-console.log('');
-console.log('Features:');
-console.log(`  ✅ ${config.enabledProviders.length} streaming providers`);
-console.log('  ✅ Built-in subtitle support');
-console.log('  ✅ Configurable provider selection');
-console.log('');
-console.log('To install in Stremio:');
-console.log('1. Open Stremio');
-console.log('2. Go to Addons (puzzle icon)');
-console.log('3. Click "Install addon" at the top');
-console.log(`4. Paste this URL: http://127.0.0.1:${port}/manifest.json`);
-console.log('');
-console.log('💡 TIP: Reinstall the addon to update to the new version!');
-console.log('');
-console.log('='.repeat(60));

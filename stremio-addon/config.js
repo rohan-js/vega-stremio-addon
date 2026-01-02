@@ -4,7 +4,7 @@
 
 module.exports = {
     // Addon server port
-    port: process.env.PORT || 7000,
+    port: process.env.PORT || 5000,
 
     // Vega providers repository base URL
     vegaProvidersBaseUrl: 'https://raw.githubusercontent.com/Zenda-Cross/vega-providers/refs/heads/main',
