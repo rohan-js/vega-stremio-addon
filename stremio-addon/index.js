@@ -1,6 +1,6 @@
 /**
  * Vega Stremio Addon
- * * Updated with enhanced metadata (Quality, Size, Audio) formatting.
+ * Main entry point with advanced metadata formatting and cleanup logic.
  */
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
@@ -9,25 +9,21 @@ const { getStreamsFromAllProviders } = require('./lib/providerLoader');
 const { imdbToTmdb, parseStremioId } = require('./lib/imdbToTmdb');
 const { getSubtitles } = require('./lib/subtitleProvider');
 
-// Addon manifest with configuration support
 const manifest = {
     id: 'org.vega.stremio.addon',
-    version: '1.3.0', // Version updated
+    version: '1.6.0',
     name: 'Vega Providers',
-    description: 'Stream movies and series with enhanced metadata (Quality, Size, Language).',
+    description: 'Advanced streaming with Auto-Size detection, Multi-Language support, and Clean UI.',
     types: ['movie', 'series'],
     resources: ['stream', 'subtitles'],
     idPrefixes: ['tt'],
     catalogs: [],
     background: 'https://raw.githubusercontent.com/vega-org/vega-app/main/assets/icon.png',
     logo: 'https://raw.githubusercontent.com/vega-org/vega-app/main/assets/icon.png',
-    behaviorHints: {
-        configurable: true,
-        configurationRequired: false,
-    },
+    behaviorHints: { configurable: true, configurationRequired: false },
     config: [
         { key: 'info', type: 'text', title: '--- GLOBAL PROVIDERS ---' },
-        { key: 'autoEmbed', type: 'checkbox', default: 'true', title: 'MultiStream' },
+        { key: 'autoEmbed', type: 'checkbox', default: 'true', title: 'MultiStream (Best for most movies)' },
         { key: 'vega', type: 'checkbox', default: 'true', title: 'VegaMovies' },
         { key: 'drive', type: 'checkbox', default: 'true', title: 'MoviesDrive' },
         { key: 'multi', type: 'checkbox', default: 'true', title: 'MultiMovies' },
@@ -65,16 +61,63 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-builder.defineStreamHandler(async (args) => {
-    const userConfig = args.config || {};
-    let enabledProvidersList;
+/**
+ * CLEANER UTILITIES
+ */
 
-    if (Object.keys(userConfig).length === 0) {
-        enabledProvidersList = config.enabledProviders;
-    } else {
+// 1. Sanitize Provider Name
+const cleanProviderName = (name) => {
+    if (!name) return 'Vega';
+    return name
+        .split(/[-!|]/)[0] // Remove everything after separators like - or !
+        .replace(/WebStreamr|Direct|Server|Link|Cloud/gi, '') // Remove generic junk words
+        .trim();
+};
+
+// 2. Advanced Title Formatter
+const formatStreamTitle = (stream, cleanQuality) => {
+    const provider = cleanProviderName(stream.providerName);
+
+    // Metadata parts
+    const size = stream.size ? `💾 ${stream.size}` : '';
+    const audio = stream.language && stream.language !== 'Multi' ? `🗣️ ${stream.language}` : '';
+    const quality = cleanQuality ? `✨ ${cleanQuality}` : '';
+    const subIcon = (stream.subtitles && stream.subtitles.length > 0) ? '🔤' : '';
+
+    // Determine Quality Emoji
+    const qVal = parseInt(cleanQuality);
+    let qEmoji = '⭐';
+    if (qVal >= 2160) qEmoji = '🔥'; // 4K
+    else if (qVal >= 1080) qEmoji = '💎'; // 1080p
+
+    // Construct the metadata bar (e.g. "✨ 1080p | 🗣️ Hindi | 💾 1.2 GB")
+    const metaBar = [quality, audio, size, subIcon]
+        .filter(part => part && part.trim() !== '') // Remove empty parts
+        .join(' | ');
+
+    // Main line: "💎 MultiStream | ✨ 1080p | 💾 1.5 GB"
+    let title = `${qEmoji} ${provider} | ${metaBar}`;
+
+    // Add server info ONLY if it's different/useful
+    if (stream.server) {
+        const cleanServer = stream.server.replace(/Server|Link|cdn/gi, '').trim();
+        // Check similarity to prevent "Provider: Vega, Server: Vega"
+        if (cleanServer.toLowerCase() !== provider.toLowerCase() && cleanServer.length > 2) {
+            title += `\n🖥️ ${cleanServer}`;
+        }
+    }
+
+    return title;
+};
+
+builder.defineStreamHandler(async (args) => {
+    // Handle configuration
+    const userConfig = args.config || {};
+    let enabledProvidersList = config.enabledProviders;
+    if (Object.keys(userConfig).length > 0) {
         enabledProvidersList = config.enabledProviders.filter(p => {
-            const configValue = userConfig[p.value];
-            return configValue === 'true' || configValue === 'on' || configValue === true || configValue === undefined;
+            const val = userConfig[p.value];
+            return val === 'true' || val === 'on' || val === true || val === undefined;
         });
     }
 
@@ -85,61 +128,44 @@ builder.defineStreamHandler(async (args) => {
 
         if (!tmdbId && !imdbId) return { streams: [] };
 
-        const params = { imdbId, tmdbId: tmdbId || '', type, season: season || '', episode: episode || '' };
-        const vegaStreams = await getStreamsFromAllProviders(params, enabledProvidersList);
+        const vegaStreams = await getStreamsFromAllProviders(
+            { imdbId, tmdbId: tmdbId || '', type, season: season || '', episode: episode || '' }, 
+            enabledProvidersList
+        );
 
         const stremioStreams = vegaStreams.map((stream) => {
-            // --- 1. ENHANCED METADATA LOGIC ---
-            const quality = stream.quality ? `${stream.quality}p` : 'HD';
-            const size = stream.size ? ` | 💾 ${stream.size}` : '';
-            const audio = stream.language ? ` | 🗣️ ${stream.language}` : '';
-            const provider = stream.providerName || 'Vega';
-            
-            // Emoji indicators
-            const qualityEmoji = stream.quality >= 2160 ? '🔥' : '⭐';
-            const subEmoji = (stream.subtitles && stream.subtitles.length > 0) ? ' 🔤' : '';
+            // Fix double quality issue (e.g. "2160p[2160p]" -> "2160p")
+            const qMatch = (stream.quality || 'HD').toString().match(/\d{3,4}/);
+            const cleanQ = qMatch ? `${qMatch[0]}p` : 'HD';
 
-            // Formatting Title (Description text)
-            // Example: ⭐ VegaMovies | 1080p | 🗣️ Hindi-Eng | 💾 1.4GB 🔤
-            let description = `${qualityEmoji} ${provider} | ${quality}${audio}${size}${subEmoji}`;
-            
-            if (stream.server) {
-                description += `\n🖥️ Server: ${stream.server}`;
-            }
+            const provider = cleanProviderName(stream.providerName);
 
-            const stremioStream = {
-                // Name appears in the left column
-                name: `${provider}\n${quality}`, 
-                // Title appears as the link description
-                title: description,
-            };
-
-            if (stream.link) {
-                stremioStream.url = stream.link;
-            }
-
-            if (stream.headers) {
-                stremioStream.behaviorHints = {
+            return {
+                name: `${provider}\n${cleanQ}`, // Compact Name for left column
+                title: formatStreamTitle(stream, cleanQ), // Rich Description
+                url: stream.link,
+                behaviorHints: {
                     notWebReady: true,
-                    proxyHeaders: { request: stream.headers },
-                };
-            }
-
-            if (stream.subtitles && Array.isArray(stream.subtitles)) {
-                stremioStream.subtitles = stream.subtitles.map((sub, index) => ({
+                    proxyHeaders: stream.headers ? { request: stream.headers } : undefined
+                },
+                subtitles: stream.subtitles ? stream.subtitles.map((sub, index) => ({
                     id: `${stream.providerValue || 'vega'}-sub-${index}`,
                     url: sub.uri || sub.url || sub.link,
                     lang: sub.language || sub.lang || 'eng',
-                })).filter(sub => sub.url);
-            }
+                })).filter(sub => sub.url) : []
+            };
+        });
 
-            return stremioStream;
+        // Sort: 4K first, then 1080p
+        stremioStreams.sort((a, b) => {
+            const getQ = (s) => parseInt(s.name.match(/\d{3,4}/)?.[0] || '0');
+            return getQ(b) - getQ(a);
         });
 
         return { streams: stremioStreams.filter(s => s.url) };
 
     } catch (error) {
-        console.error('Stream handler error:', error);
+        console.error('Stream Handler Error:', error);
         return { streams: [] };
     }
 });
@@ -148,11 +174,9 @@ builder.defineSubtitlesHandler(async (args) => {
     try {
         const { imdbId, season, episode } = parseStremioId(args.id);
         const subtitles = await getSubtitles(imdbId, args.type, season, episode);
-        return { subtitles };
-    } catch (error) {
-        return { subtitles: [] };
-    }
+        return { subtitles: subtitles || [] };
+    } catch (e) { return { subtitles: [] }; }
 });
 
-const port = config.port;
+const port = config.port || 7000;
 serveHTTP(builder.getInterface(), { port });
